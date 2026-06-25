@@ -6,8 +6,8 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# MintMe RPC Configuration
-MINTME_RPC_URL = "https://node1.mintme.com"
+# MintMe API Configuration
+MINTME_API_URL = "https://www.mintme.com/api/v2"
 
 # Add CORS headers for browser requests
 @app.after_request
@@ -17,91 +17,121 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
 
-def fetch_recent_transactions(limit=50):
+def fetch_wallet_transactions(wallet_address, limit=20, offset=0):
     """
-    Fetch recent transactions from MintMe blockchain via JSON-RPC
+    Fetch transactions directly for a specific wallet using MintMe REST API
     """
     try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "apis_getRecentTransactions",
-            "params": [hex(limit), "0x0"]
+        # Using MintMe's REST API to get wallet transactions
+        # The endpoint format is based on MintMe API v2
+        url = f"{MINTME_API_URL}/addresses/{wallet_address}/transactions"
+        
+        params = {
+            'limit': limit,
+            'offset': offset
         }
         
-        # Add timeout and headers
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
         
-        response = requests.post(
-            MINTME_RPC_URL,
-            json=payload,
+        response = requests.get(
+            url,
+            params=params,
             headers=headers,
-            timeout=15  # Shorter timeout for Vercel
+            timeout=30
         )
         
         if response.status_code == 200:
             data = response.json()
-            if 'result' in data and isinstance(data['result'], list):
-                return data['result']
-        
-        return []
+            return data.get('result', [])
+        else:
+            # If REST API fails, try the RPC method as fallback
+            return fetch_wallet_transactions_rpc(wallet_address, limit)
             
-    except requests.exceptions.Timeout:
-        print("Timeout connecting to MintMe node")
-        return []
-    except requests.exceptions.ConnectionError:
-        print("Connection error to MintMe node")
-        return []
     except Exception as e:
-        print(f"Unexpected error fetching transactions: {str(e)}")
-        return []
+        print(f"Error fetching wallet transactions: {str(e)}")
+        # Fallback to RPC method
+        return fetch_wallet_transactions_rpc(wallet_address, limit)
 
-def filter_transactions_by_address(transactions, wallet_address):
+def fetch_wallet_transactions_rpc(wallet_address, limit=20):
     """
-    Filter transactions that involve the given wallet address
+    Fallback: Fetch transactions using RPC but specifically for the wallet
     """
-    if not transactions:
-        return []
-    
-    wallet_lower = wallet_address.lower()
-    filtered = []
-    
-    for tx in transactions:
-        tx_from = tx.get('from', '').lower()
-        tx_to = tx.get('to', '').lower()
+    try:
+        wallet_lower = wallet_address.lower()
+        all_tx = []
         
-        if tx_from == wallet_lower or tx_to == wallet_lower:
-            # Format the transaction for cleaner output
-            value = tx.get('value', '0')
-            try:
-                value_mintme = float(value) / 1e18 if value != '0' else 0
-            except:
-                value_mintme = 0
+        # Fetch a larger batch to ensure we get some transactions
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "apis_getRecentTransactions",
+            "params": ["0x3E8", "0x0"]  # Fetch 1000 transactions
+        }
+        
+        response = requests.post(
+            "https://node1.mintme.com",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            transactions = data.get('result', [])
             
-            formatted_tx = {
-                'hash': tx.get('transactionHash', tx.get('hash', 'N/A')),
-                'from': tx.get('from', 'N/A'),
-                'to': tx.get('to', 'N/A'),
-                'value': value,
-                'value_mintme': value_mintme,
-                'timestamp': tx.get('timestamp', 'N/A'),
-                'blockNumber': tx.get('blockNumber', 'N/A'),
-                'direction': 'INCOMING' if tx_to == wallet_lower else 'OUTGOING'
-            }
-            filtered.append(formatted_tx)
-    
-    return filtered
+            # Only keep transactions for this specific wallet
+            for tx in transactions:
+                tx_from = tx.get('from', '').lower()
+                tx_to = tx.get('to', '').lower()
+                
+                if tx_from == wallet_lower or tx_to == wallet_lower:
+                    value = tx.get('value', '0')
+                    try:
+                        value_mintme = float(value) / 1e18 if value != '0' else 0
+                    except:
+                        value_mintme = 0
+                    
+                    # Convert timestamp
+                    timestamp = tx.get('timestamp', 'N/A')
+                    if timestamp != 'N/A':
+                        try:
+                            dt = datetime.fromtimestamp(int(timestamp))
+                            timestamp = dt.isoformat() + 'Z'
+                        except:
+                            pass
+                    
+                    all_tx.append({
+                        'hash': tx.get('transactionHash', tx.get('hash', 'N/A')),
+                        'from': tx.get('from', 'N/A'),
+                        'to': tx.get('to', 'N/A'),
+                        'value': value,
+                        'value_mintme': value_mintme,
+                        'timestamp': timestamp,
+                        'blockNumber': tx.get('blockNumber', 'N/A'),
+                        'direction': 'INCOMING' if tx_to == wallet_lower else 'OUTGOING'
+                    })
+                    
+                    if len(all_tx) >= limit:
+                        break
+            
+            return all_tx
+        
+        return []
+            
+    except Exception as e:
+        print(f"RPC fallback error: {str(e)}")
+        return []
 
 @app.route('/', methods=['GET', 'OPTIONS'])
 def home():
     """Home endpoint with API documentation"""
     return jsonify({
         'name': 'MintMe Wallet Transaction API',
-        'version': '1.0.0',
-        'description': 'Fetch latest transactions for any MintMe wallet address',
+        'version': '1.0.2',
+        'description': 'Fetch transactions directly for a specific wallet address',
         'endpoints': {
             '/transactions': {
                 'method': 'GET',
@@ -118,10 +148,10 @@ def home():
 @app.route('/transactions', methods=['GET', 'OPTIONS'])
 def get_transactions():
     """
-    Main endpoint to fetch transactions for a specific wallet
+    Fetch transactions for a specific wallet address
     Query parameters:
         - wallet: The wallet address (required)
-        - limit: Number of transactions to fetch (optional, default: 20, max: 100)
+        - limit: Number of transactions to fetch (default: 20, max: 100)
     """
     # Handle OPTIONS request for CORS
     if request.method == 'OPTIONS':
@@ -158,11 +188,10 @@ def get_transactions():
         }), 400
     
     try:
-        # Fetch more transactions to ensure we have enough after filtering
-        fetch_limit = min(limit * 3, 150)
-        raw_transactions = fetch_recent_transactions(fetch_limit)
+        # Fetch transactions for this specific wallet
+        transactions = fetch_wallet_transactions(wallet_address, limit)
         
-        if not raw_transactions:
+        if not transactions:
             return jsonify({
                 'wallet': wallet_address,
                 'total_transactions': 0,
@@ -176,20 +205,14 @@ def get_transactions():
                 'message': 'No transactions found for this wallet'
             })
         
-        # Filter transactions for this wallet
-        filtered_transactions = filter_transactions_by_address(raw_transactions, wallet_address)
-        
-        # Limit the results
-        filtered_transactions = filtered_transactions[:limit]
-        
         # Calculate summary
-        incoming = [t for t in filtered_transactions if t['direction'] == 'INCOMING']
-        outgoing = [t for t in filtered_transactions if t['direction'] == 'OUTGOING']
+        incoming = [t for t in transactions if t['direction'] == 'INCOMING']
+        outgoing = [t for t in transactions if t['direction'] == 'OUTGOING']
         
         response_data = {
             'wallet': wallet_address,
-            'total_transactions': len(filtered_transactions),
-            'transactions': filtered_transactions,
+            'total_transactions': len(transactions),
+            'transactions': transactions,
             'summary': {
                 'total_incoming': len(incoming),
                 'total_outgoing': len(outgoing),
