@@ -6,10 +6,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# MintMe API Configuration
-MINTME_API_URL = "https://www.mintme.com/api/v2"
-
-# Add CORS headers for browser requests
+# Add CORS headers
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -17,58 +14,21 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
 
-def fetch_wallet_transactions(wallet_address, limit=20, offset=0):
+def fetch_wallet_transactions(wallet_address, limit=20):
     """
-    Fetch transactions directly for a specific wallet using MintMe REST API
+    Fetch transactions for a specific wallet using RPC
     """
+    wallet_lower = wallet_address.lower()
+    all_tx = []
+    
     try:
-        # Using MintMe's REST API to get wallet transactions
-        # The endpoint format is based on MintMe API v2
-        url = f"{MINTME_API_URL}/addresses/{wallet_address}/transactions"
-        
-        params = {
-            'limit': limit,
-            'offset': offset
-        }
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-        
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            return data.get('result', [])
-        else:
-            # If REST API fails, try the RPC method as fallback
-            return fetch_wallet_transactions_rpc(wallet_address, limit)
-            
-    except Exception as e:
-        print(f"Error fetching wallet transactions: {str(e)}")
-        # Fallback to RPC method
-        return fetch_wallet_transactions_rpc(wallet_address, limit)
-
-def fetch_wallet_transactions_rpc(wallet_address, limit=20):
-    """
-    Fallback: Fetch transactions using RPC but specifically for the wallet
-    """
-    try:
-        wallet_lower = wallet_address.lower()
-        all_tx = []
-        
-        # Fetch a larger batch to ensure we get some transactions
+        # Fetch a large batch of transactions (2000)
+        # This ensures we catch older transactions
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "apis_getRecentTransactions",
-            "params": ["0x3E8", "0x0"]  # Fetch 1000 transactions
+            "params": ["0x7D0", "0x0"]  # 2000 transactions in hex
         }
         
         response = requests.post(
@@ -82,6 +42,8 @@ def fetch_wallet_transactions_rpc(wallet_address, limit=20):
             data = response.json()
             transactions = data.get('result', [])
             
+            print(f"Fetched {len(transactions)} total transactions")  # For debugging
+            
             # Only keep transactions for this specific wallet
             for tx in transactions:
                 tx_from = tx.get('from', '').lower()
@@ -94,7 +56,10 @@ def fetch_wallet_transactions_rpc(wallet_address, limit=20):
                     except:
                         value_mintme = 0
                     
-                    # Convert timestamp
+                    # Get transaction hash
+                    tx_hash = tx.get('transactionHash', tx.get('hash', 'N/A'))
+                    
+                    # Format timestamp
                     timestamp = tx.get('timestamp', 'N/A')
                     if timestamp != 'N/A':
                         try:
@@ -104,55 +69,43 @@ def fetch_wallet_transactions_rpc(wallet_address, limit=20):
                             pass
                     
                     all_tx.append({
-                        'hash': tx.get('transactionHash', tx.get('hash', 'N/A')),
+                        'hash': tx_hash,
                         'from': tx.get('from', 'N/A'),
                         'to': tx.get('to', 'N/A'),
                         'value': value,
                         'value_mintme': value_mintme,
                         'timestamp': timestamp,
                         'blockNumber': tx.get('blockNumber', 'N/A'),
-                        'direction': 'INCOMING' if tx_to == wallet_lower else 'OUTGOING'
+                        'direction': 'INCOMING' if tx_to == wallet_lower else 'OUTGOING',
+                        'raw': tx  # Keep raw for debugging if needed
                     })
                     
+                    # Stop if we have enough
                     if len(all_tx) >= limit:
                         break
             
+            print(f"Found {len(all_tx)} transactions for wallet")  # For debugging
             return all_tx
         
         return []
             
     except Exception as e:
-        print(f"RPC fallback error: {str(e)}")
+        print(f"Error: {str(e)}")
         return []
 
 @app.route('/', methods=['GET', 'OPTIONS'])
 def home():
-    """Home endpoint with API documentation"""
     return jsonify({
         'name': 'MintMe Wallet Transaction API',
-        'version': '1.0.2',
-        'description': 'Fetch transactions directly for a specific wallet address',
-        'endpoints': {
-            '/transactions': {
-                'method': 'GET',
-                'parameters': {
-                    'wallet': 'Wallet address (required)',
-                    'limit': 'Number of transactions to fetch (default: 20, max: 100)'
-                },
-                'example': '/transactions?wallet=0x1b3aa657e0d114bc9a6bd8f16cb32233f34875e9&limit=10'
-            }
-        },
+        'version': '1.0.3',
+        'description': 'Fetch transactions for any MintMe wallet address',
+        'endpoint': '/transactions?wallet=0x...&limit=20',
+        'example': '/transactions?wallet=0x1b3aa657e0d114bc9a6bd8f16cb32233f34875e9&limit=10',
         'status': 'running'
     })
 
 @app.route('/transactions', methods=['GET', 'OPTIONS'])
 def get_transactions():
-    """
-    Fetch transactions for a specific wallet address
-    Query parameters:
-        - wallet: The wallet address (required)
-        - limit: Number of transactions to fetch (default: 20, max: 100)
-    """
     # Handle OPTIONS request for CORS
     if request.method == 'OPTIONS':
         return '', 200
@@ -202,7 +155,7 @@ def get_transactions():
                     'total_value_in': 0,
                     'total_value_out': 0
                 },
-                'message': 'No transactions found for this wallet'
+                'message': 'No transactions found for this wallet. The wallet might be new or have no recent activity.'
             })
         
         # Calculate summary
@@ -227,7 +180,8 @@ def get_transactions():
     except Exception as e:
         return jsonify({
             'error': 'Internal server error',
-            'message': str(e)
+            'message': str(e),
+            'debug': 'Check Vercel logs for more details'
         }), 500
 
 # Vercel requires this
