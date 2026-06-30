@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/send-token.js": {
+      "runtime": "nodejs20.x"
+    }
+  }
+}
